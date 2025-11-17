@@ -165,10 +165,10 @@ impl Client {
         // then we'll have `MAKEFLAGS` env vars but won't actually have
         // access to the file descriptors.
         //
-        // `NotAPipe` is a worse error, return it if it's reported for any of the two fds.
+        // `UnsupportedFdType` is a worse error, return it if it's reported for any of the two fds.
         match (fd_check(read, check_pipe), fd_check(write, check_pipe)) {
-            (read_err @ Err(FromEnvErrorInner::NotAPipe(..)), _) => read_err?,
-            (_, write_err @ Err(FromEnvErrorInner::NotAPipe(..))) => write_err?,
+            (read_err @ Err(FromEnvErrorInner::UnsupportedFdType(..)), _) => read_err?,
+            (_, write_err @ Err(FromEnvErrorInner::UnsupportedFdType(..))) => write_err?,
             (read_err, write_err) => {
                 read_err?;
                 write_err?;
@@ -483,19 +483,32 @@ unsafe fn fd_check(fd: c_int, check_pipe: bool) -> Result<(), FromEnvErrorInner>
         if libc::fstat(fd, &mut stat) == -1 {
             let last_os_error = io::Error::last_os_error();
             fcntl_check(fd)?;
-            Err(FromEnvErrorInner::NotAPipe(fd, Some(last_os_error)))
+            Err(FromEnvErrorInner::UnsupportedFdType(
+                fd,
+                Some(last_os_error),
+            ))
         } else {
             // On android arm and i686 mode_t is u16 and st_mode is u32,
-            // this generates a type mismatch when S_IFIFO (declared as mode_t)
-            // is used in operations with st_mode, so we use this workaround
-            // to get the value of S_IFIFO with the same type of st_mode.
-            #[allow(unused_assignments)]
-            let mut s_ififo = stat.st_mode;
-            s_ififo = libc::S_IFIFO as _;
-            if stat.st_mode & s_ififo == s_ififo {
+            // this generates a type mismatch when the S_IF* constants (declared
+            // as mode_t) are used in operations with st_mode, so we use this
+            // workaround to get their value with the same type as st_mode.
+            let as_st_mode = |v| {
+                #[allow(unused_assignments)]
+                let mut t = stat.st_mode;
+                t = v as _;
+                t
+            };
+
+            let fmt = stat.st_mode & as_st_mode(libc::S_IFMT);
+            // Allow pipes (S_IFIFO), sockets (S_IFSOCK) and character devices
+            // (S_IFCHR)
+            if fmt == as_st_mode(libc::S_IFIFO)
+                || fmt == as_st_mode(libc::S_IFSOCK)
+                || fmt == as_st_mode(libc::S_IFCHR)
+            {
                 return Ok(());
             }
-            Err(FromEnvErrorInner::NotAPipe(fd, None))
+            Err(FromEnvErrorInner::UnsupportedFdType(fd, None))
         }
     } else {
         fcntl_check(fd)
