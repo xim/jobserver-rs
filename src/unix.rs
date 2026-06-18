@@ -569,7 +569,7 @@ extern "C" fn sigusr1_handler(
 mod test {
     use super::Client as ClientImp;
 
-    use crate::{test::run_named_fifo_try_acquire_tests, Client};
+    use crate::{test::run_named_fifo_try_acquire_tests, Client, FromEnvErrorInner};
 
     use std::{fs::File, io::Write, os::unix::io::AsRawFd, sync::Arc};
 
@@ -643,5 +643,53 @@ mod test {
 
         let (client, arg) = new_client_from_pipe();
         assert_eq!(client.inner.string_arg(), arg);
+    }
+
+    #[test]
+    fn test_fd_check_accepts_pipe() {
+        let (read, write) = nix::unistd::pipe().unwrap();
+        let read = File::from(read);
+        let write = File::from(write);
+        unsafe {
+            super::fd_check(read.as_raw_fd(), true).unwrap();
+            super::fd_check(write.as_raw_fd(), true).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_fd_check_accepts_socket() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+        unsafe {
+            super::fd_check(a.as_raw_fd(), true).unwrap();
+            super::fd_check(b.as_raw_fd(), true).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_fd_check_accepts_char_device() {
+        // `/dev/null` is a character device, and present ~everywhere?
+        let dev_null = File::open("/dev/null").unwrap();
+        unsafe {
+            super::fd_check(dev_null.as_raw_fd(), true).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_fd_check_rejects_regular_file() {
+        let file = tempfile::tempfile().unwrap();
+        let err = unsafe { super::fd_check(file.as_raw_fd(), true) }.unwrap_err();
+        assert!(
+            matches!(err, FromEnvErrorInner::UnsupportedFdType(_, None)),
+            "unexpected error: {err:?}",
+        );
+    }
+
+    #[test]
+    fn test_fd_check_skips_type_check_when_check_pipe_false() {
+        // `fd_check=false` only verifies the fd is open.
+        let file = tempfile::tempfile().unwrap();
+        unsafe {
+            super::fd_check(file.as_raw_fd(), false).unwrap();
+        }
     }
 }
